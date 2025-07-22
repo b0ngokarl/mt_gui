@@ -49,6 +49,38 @@ Eine erweiterte grafische Benutzeroberfläche für Meshtastic-Geräte mit verbes
 
 ### **Test Results (All Passing)**
 ```
+
+## 📁 Git Repository Setup
+
+### **Files Tracked in Git**
+- ✅ **Source Code**: `meshtastic_gui.py` - Main application
+- ✅ **Testing**: `test_*.py`, `run_tests.sh`, `run_gui.sh` - Test suite and scripts
+- ✅ **Documentation**: `README.md`, `test_features.md` - Project documentation
+- ✅ **Configuration**: `.gitignore` - Git ignore rules
+
+### **Files NOT Tracked (Auto-generated)**
+- ❌ **User Settings**: `*.json` files (connection presets, device connections, etc.)
+- ❌ **Cache Files**: `__pycache__/`, `*.pyc` - Python bytecode
+- ❌ **Virtual Environment**: `.venv/` - Python dependencies
+- ❌ **IDE Files**: `.vscode/`, `.idea/` - Editor configurations
+- ❌ **Temporary Files**: `*.log`, `*.tmp`, `*.yaml` - Runtime artifacts
+
+### **First Time Setup**
+```bash
+# Clone repository
+git clone <your-repo-url>
+cd mt_gui
+
+# Create virtual environment
+python3 -m venv .venv
+source .venv/bin/activate
+
+# Install dependencies
+pip install PyQt5 pyyaml
+
+# Run the GUI
+python3 meshtastic_gui.py
+```
 🧪 AUTOMATED TEST RESULTS
 ============================================================
 Total Tests: 6
