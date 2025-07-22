@@ -40,6 +40,7 @@ venv.bak/
 *~
 .DS_Store
 Thumbs.db
+import sys.py
 
 # Application-specific files
 *.json
