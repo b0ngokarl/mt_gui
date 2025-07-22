@@ -4,12 +4,94 @@ import os
 import subprocess
 import datetime
 import csv
+import re
+import webbrowser
+import queue
+import threading
+import traceback
 from PyQt5.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout, 
                              QGroupBox, QComboBox, QLineEdit, QPushButton, 
                              QLabel, QMessageBox, QFileDialog, QTableWidget,
                              QTableWidgetItem, QTextEdit, QSpinBox, QCheckBox, 
                              QScrollArea, QDialog)
-from PyQt5.QtCore import QThread, pyqtSignal
+from PyQt5.QtCore import QThread, pyqtSignal, QTimer
+from PyQt5.QtCore import Qt
+
+class CommandQueueManager(QThread):
+    """Manages a queue of Meshtastic CLI commands to prevent GUI blocking"""
+    command_completed = pyqtSignal(str, str, str)  # command_id, output, error
+    command_started = pyqtSignal(str)  # command_id
+    
+    def __init__(self):
+        super().__init__()
+        self.command_queue = queue.Queue()
+        self.running = True
+        self.current_command = None
+        
+    def add_command(self, command_id, cmd_args, callback=None):
+        """Add a command to the queue"""
+        self.command_queue.put({
+            'id': command_id,
+            'args': cmd_args,
+            'callback': callback
+        })
+        
+    def stop(self):
+        """Stop the command queue manager"""
+        self.running = False
+        # Add a sentinel value to wake up the thread
+        self.command_queue.put(None)
+        
+    def run(self):
+        """Process commands from the queue"""
+        while self.running:
+            try:
+                # Get command from queue (blocks until available)
+                command_item = self.command_queue.get(timeout=1)
+                
+                if command_item is None:  # Sentinel value to stop
+                    break
+                    
+                command_id = command_item['id']
+                cmd_args = command_item['args']
+                callback = command_item.get('callback')
+                
+                self.current_command = command_id
+                self.command_started.emit(command_id)
+                
+                try:
+                    # Execute the command
+                    process = subprocess.Popen(
+                        cmd_args,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True
+                    )
+                    output, error = process.communicate()
+
+                    # Log the completion of the command
+                    print(f"Command {command_id} completed. Output: {output}, Error: {error}")
+
+                    # Emit completion signal
+                    self.command_completed.emit(command_id, output, error)
+
+                    # Call callback if provided
+                    if callback:
+                        callback(output, error)
+
+                except Exception as e:
+                    error_msg = f"Command execution failed: {str(e)}"
+                    print(f"Command {command_id} failed with error: {error_msg}")
+                    self.command_completed.emit(command_id, "", error_msg)
+                    
+                finally:
+                    self.current_command = None
+                    self.command_queue.task_done()
+                    
+            except queue.Empty:
+                continue
+            except Exception as e:
+                print(f"Command queue error: {str(e)}")
 
 class CommandWorker(QThread):
     output_ready = pyqtSignal(str)
@@ -86,22 +168,193 @@ class MeshtasticClientGUI(QWidget):
         # Command timing variables
         self.command_start_times = {}  # Track command start times {worker_id: start_time}
         self.log_entries = []  # Store log entries for potential export
+        self.active_workers = []  # Track active background workers
+        
+        # Initialize command queue manager
+        self.command_queue_manager = CommandQueueManager()
+        self.command_queue_manager.command_completed.connect(self.onCommandCompleted)
+        self.command_queue_manager.command_started.connect(self.onCommandStarted)
+        self.command_queue_manager.start()
+        
+        # Track pending commands
+        self.pending_commands = {}  # command_id -> {type, callback, timestamp}
         
         self.initUI()
         self.loadSettings()
         self.loadConnectionPresets()
         self.loadDiscoveredNodes()
+        self.loadFavorites()
+        self.loadNodeRemarks()
+        self.loadTracerouteHistory()
+        self.loadTelemetryHistory()
         
         # Load device connections for smart preset matching
         self.loadDeviceConnections()
     
+    def logWithTimestamp(self, message):
+        """Add a timestamped message to the results display"""
+        import datetime
+        timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        self.results_display.append(f"[{timestamp}] {message}")
+    
+    def queueMeshtasticCommand(self, cmd_args, command_type="generic", callback=None):
+        """Queue a Meshtastic command for execution in background thread"""
+        command_id = f"{command_type}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S_%f')}"
+        
+        # Store command info
+        self.pending_commands[command_id] = {
+            'type': command_type,
+            'callback': callback,
+            'timestamp': datetime.datetime.now(),
+            'args': cmd_args
+        }
+        
+        # Add to queue
+        self.command_queue_manager.add_command(command_id, cmd_args, callback)
+        
+        self.logWithTimestamp(f"Queued {command_type}: {' '.join(cmd_args)}")
+        self.updateQueueStatus()
+        return command_id
+    
+    def updateQueueStatus(self):
+        """Update the queue status display"""
+        if hasattr(self, 'queue_status_label'):
+            pending_count = len(self.pending_commands)
+            current = getattr(self.command_queue_manager, 'current_command', None)
+            if current:
+                self.queue_status_label.setText(f"Queue: {pending_count} pending (running: {current.split('_')[0]})")
+            else:
+                self.queue_status_label.setText(f"Queue: {pending_count} pending")
+            
+            # Change color based on queue size
+            if pending_count == 0:
+                self.queue_status_label.setStyleSheet("QLabel { color: green; font-weight: bold; }")
+            elif pending_count < 3:
+                self.queue_status_label.setStyleSheet("QLabel { color: blue; font-weight: bold; }")
+            else:
+                self.queue_status_label.setStyleSheet("QLabel { color: orange; font-weight: bold; }")
+    
+    def onCommandStarted(self, command_id):
+        """Handle command start notification"""
+        if command_id in self.pending_commands:
+            cmd_info = self.pending_commands[command_id]
+            self.logWithTimestamp(f"Executing {cmd_info['type']}...")
+    
+    def onCommandCompleted(self, command_id, output, error):
+        """Handle command completion"""
+        if command_id not in self.pending_commands:
+            return
+            
+        cmd_info = self.pending_commands[command_id]
+        cmd_type = cmd_info['type']
+        cmd_args = cmd_info.get('args', [])
+        
+        # Always log the actual command that was executed
+        self.logWithTimestamp(f"Command executed: {' '.join(cmd_args)}")
+        
+        # Log results - show both output and error for debugging
+        if error:
+            self.logWithTimestamp(f"{cmd_type} stderr: {error}")
+        if output:
+            self.logWithTimestamp(f"{cmd_type} stdout: {output}")
+            if cmd_type == "nodes":
+                self.onNodesCommandCompleted(output)
+        
+        # If no output and no error, that's also useful to know
+        if not output and not error:
+            self.logWithTimestamp(f"{cmd_type} completed with no output or error")
+        
+        # Clean up
+        del self.pending_commands[command_id]
+        
+        # Update UI state
+        self.updateUIAfterCommand(cmd_type)
+        self.updateQueueStatus()
+    
+    def onNodesCommandCompleted(self, output):
+        """Handle nodes command completion"""
+        try:
+            self.logWithTimestamp(f"Parsing nodes output (length: {len(output)} chars)")
+            
+            # Show first 200 chars of output for debugging
+            if output:
+                preview = output[:200] + "..." if len(output) > 200 else output
+                self.logWithTimestamp(f"Output preview: {repr(preview)}")
+            
+            nodes = self.parse_meshtastic_table_output(output)
+            self.logWithTimestamp(f"Parsed {len(nodes)} nodes from output")
+            
+            # Merge new nodes with existing discovered_nodes, preserving user data
+            for node in nodes:
+                node_id = node.get('ID') or node.get('id') or str(len(self.discovered_nodes))
+                if node_id in self.discovered_nodes:
+                    existing = self.discovered_nodes[node_id]
+                    new_last_heard = node.get('LastHeard') or node.get('lastHeard') or ""
+                    existing_last_heard = existing.get('LastHeard') or existing.get('lastHeard') or ""
+                    
+                    if (new_last_heard and (not existing_last_heard or new_last_heard > existing_last_heard)):
+                        for key, value in node.items():
+                            existing[key] = value
+                else:
+                    self.discovered_nodes[node_id] = node
+            
+            self.saveDiscoveredNodes()
+            self.update_nodes_table(nodes)
+            
+        except Exception as e:
+            self.logWithTimestamp(f"Failed to process nodes output: {str(e)}")
+            import traceback
+            self.logWithTimestamp(f"Traceback: {traceback.format_exc()}")
+    
+    def updateUIAfterCommand(self, cmd_type):
+        """Update UI state after command completion"""
+        if cmd_type == "traceroute":
+            self.traceroute_btn.setEnabled(True)
+            self.traceroute_btn.setText("Traceroute")
+        elif cmd_type == "telemetry":
+            self.telemetry_btn.setEnabled(True)
+            self.telemetry_btn.setText("Get Telemetry")
+        elif cmd_type == "reboot":
+            self.logWithTimestamp("Device reboot command completed.")
+    
+    def closeEvent(self, event):
+        """Handle application close event"""
+        if hasattr(self, 'command_queue_manager'):
+            self.command_queue_manager.stop()
+            self.command_queue_manager.wait(3000)  # Wait up to 3 seconds
+        event.accept()
+    
+    def onComboBoxClicked(self, event, combo_box):
+        """Handle mouse click on combo box to ensure it opens"""
+        if event.button() == Qt.LeftButton:
+            # Use a timer to ensure the popup opens
+            QTimer.singleShot(0, combo_box.showPopup)
+        # Always call the original mouse press event
+        QComboBox.mousePressEvent(combo_box, event)
+    
+    def eventFilter(self, obj, event):
+        """Event filter to handle combo box events"""
+        if isinstance(obj, QComboBox):
+            if event.type() == event.MouseButtonPress:
+                if event.button() == Qt.LeftButton:
+                    # Force the popup to show
+                    QTimer.singleShot(0, obj.showPopup)
+                    return False  # Let the event continue
+            elif event.type() == event.MouseButtonRelease:
+                if event.button() == Qt.LeftButton:
+                    # Ensure popup is shown on release too
+                    if not obj.view().isVisible():
+                        QTimer.singleShot(10, obj.showPopup)
+                    return False
+        return super().eventFilter(obj, event)
+    
     def initUI(self):
         self.setWindowTitle("Meshtastic Client GUI")
         self.setGeometry(100, 100, 1200, 800)
-        
+        # Ensure combo boxes pop up on click
         # Main layout
         main_layout = QVBoxLayout()
-        
+
         # Top row: Connection settings (left) and Manual targets (right)
         top_row = QHBoxLayout()
         
@@ -116,6 +369,9 @@ class MeshtasticClientGUI(QWidget):
         self.connection_method.addItems(["Serial Port", "IP Address", "Bluetooth"])
         self.connection_method.currentTextChanged.connect(self.onConnectionMethodChanged)
         self.connection_method.setMaximumWidth(120)
+        # Ensure QComboBox widgets accept mouse interaction
+        self.connection_method.setFocusPolicy(Qt.StrongFocus)
+        self.connection_method.setAttribute(Qt.WA_TransparentForMouseEvents, False)  # Ensure QComboBox widgets explicitly accept mouse events
         first_row.addWidget(self.connection_method)
         
         # Add preset selector
@@ -123,6 +379,9 @@ class MeshtasticClientGUI(QWidget):
         self.connection_preset = QComboBox()
         self.connection_preset.setMaximumWidth(150)
         self.connection_preset.currentTextChanged.connect(self.onPresetChanged)
+        # Ensure QComboBox widgets accept mouse interaction
+        self.connection_preset.setFocusPolicy(Qt.StrongFocus)
+        self.connection_preset.setAttribute(Qt.WA_TransparentForMouseEvents, False)  # Ensure QComboBox widgets explicitly accept mouse events
         first_row.addWidget(self.connection_preset)
 
         # Inline preset name input and save button
@@ -257,6 +516,10 @@ class MeshtasticClientGUI(QWidget):
         self.target_select.setMaximumWidth(300)  # Increased width
         self.target_select.setMinimumWidth(200)  # Added minimum width
         self.target_select.setMaximumHeight(25)  # Added height constraint
+        self.target_select.addItem("")  # Add empty default item
+        # Ensure QComboBox widgets accept mouse interaction
+        self.target_select.setFocusPolicy(Qt.StrongFocus)
+        self.target_select.setAttribute(Qt.WA_TransparentForMouseEvents, False)  # Ensure QComboBox widgets explicitly accept mouse events
         action_controls.addWidget(self.target_select)
         
         action_controls.addWidget(QLabel("Channel:"))
@@ -288,6 +551,9 @@ class MeshtasticClientGUI(QWidget):
         self.message_type.addItems(["To Channel", "To Node"])
         self.message_type.currentTextChanged.connect(self.onMessageTypeChanged)
         self.message_type.setMaximumWidth(100)
+        # Ensure QComboBox widgets accept mouse interaction
+        self.message_type.setFocusPolicy(Qt.StrongFocus)
+        self.message_type.setAttribute(Qt.WA_TransparentForMouseEvents, False)  # Ensure QComboBox widgets explicitly accept mouse events
         message_controls.addWidget(self.message_type)
         
         # Message text input
@@ -400,6 +666,9 @@ class MeshtasticClientGUI(QWidget):
         self.location_service_combo.setCurrentText(self.location_service)
         self.location_service_combo.currentTextChanged.connect(self.onLocationServiceChanged)
         self.location_service_combo.setMaximumWidth(120)
+        # Ensure QComboBox widgets accept mouse interaction
+        self.location_service_combo.setFocusPolicy(Qt.StrongFocus)
+        self.location_service_combo.setAttribute(Qt.WA_TransparentForMouseEvents, False)
         filter_row.addWidget(self.location_service_combo)
         
         # Key acknowledgment button
@@ -411,6 +680,12 @@ class MeshtasticClientGUI(QWidget):
         filter_row.addWidget(self.ack_keys_btn)
         
         filter_row.addStretch()
+        
+        # Queue status display (bottom right corner)
+        self.queue_status_label = QLabel("Queue: 0 pending")
+        self.queue_status_label.setStyleSheet("QLabel { color: blue; font-weight: bold; }")
+        self.queue_status_label.setToolTip("Number of commands in the execution queue")
+        filter_row.addWidget(self.queue_status_label)
         
         # Node table
         self.nodes_table = QTableWidget()
@@ -450,6 +725,21 @@ class MeshtasticClientGUI(QWidget):
         
         # Set initial message type state
         self.onMessageTypeChanged("To Channel")  # Initialize with channel mode
+        
+        # Ensure all combo boxes can receive mouse events properly
+        for combo in [self.connection_method, self.connection_preset, self.target_select, 
+                      self.message_type, self.location_service_combo]:
+            combo.setEnabled(True)
+            combo.setMouseTracking(True)
+            combo.setAcceptDrops(False)
+            combo.clearFocus()  # Clear any initial focus issues
+            # Try multiple approaches to fix dropdown
+            combo.mousePressEvent = lambda event, cb=combo: self.onComboBoxClicked(event, cb)
+            combo.setFocusPolicy(Qt.StrongFocus)
+            combo.setAttribute(Qt.WA_TransparentForMouseEvents, False)
+            # Force enable interaction
+            combo.setStyleSheet("QComboBox { background-color: white; }")
+            combo.installEventFilter(self)
     
     def onConnectionMethodChanged(self, method):
         """Handle connection method change"""
@@ -601,80 +891,202 @@ class MeshtasticClientGUI(QWidget):
         """Reboot device using Meshtastic CLI"""
         try:
             cmd = self.buildMeshtasticCommand("--reboot")
-            self.results_display.append(f"Rebooting device: {' '.join(cmd)}")
-            
-            # Execute the reboot command
-            process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-            output, error = process.communicate()
-            
-            if error:
-                self.results_display.append(f"Reboot error: {error}")
-            if output:
-                self.results_display.append(f"Reboot output: {output}")
-            
-            self.results_display.append("Device reboot command sent.")
-            
+            self.queueMeshtasticCommand(cmd, "reboot")
         except Exception as e:
-            self.results_display.append(f"Reboot error: {str(e)}")
+            self.logWithTimestamp(f"Reboot error: {str(e)}")
 
     def onKillAllMeshtastic(self):
-        """Kill all meshtastic processes"""
+        """Kill all meshtastic CLI processes (not the GUI)"""
         try:
-            subprocess.run("pkill -f meshtastic", shell=True)
-            self.results_display.append("All Meshtastic processes killed.")
+            # Kill meshtastic CLI processes but exclude this GUI
+            result = subprocess.run("pkill -f 'meshtastic(?!.*gui)'", shell=True, capture_output=True, text=True)
+            # Also clear the command queue
+            if hasattr(self, 'command_queue_manager'):
+                # Clear pending commands
+                while not self.command_queue_manager.command_queue.empty():
+                    try:
+                        self.command_queue_manager.command_queue.get_nowait()
+                    except:
+                        break
+                self.pending_commands.clear()
+                self.updateQueueStatus()
+            self.logWithTimestamp("Meshtastic CLI processes killed and queue cleared.")
         except Exception as e:
-            self.results_display.append(f"Kill All Error: {str(e)}")
+            self.logWithTimestamp(f"Kill All Error: {str(e)}")
 
     def onLoadConfig(self):
         """Load configuration"""
         # Real config load logic could be added here
-        self.results_display.append("Configuration loaded.")
+        self.logWithTimestamp("Configuration loaded.")
 
     def onSaveConfig(self):
         """Save configuration"""
         # Real config save logic could be added here
-        self.results_display.append("Configuration saved.")
+        self.logWithTimestamp("Configuration saved.")
 
     def onResetConfig(self):
         """Reset configuration"""
         # Real config reset logic could be added here
-        self.results_display.append("Configuration reset.")
+        self.logWithTimestamp("Configuration reset.")
 
     def onTraceroute(self):
         """Perform traceroute"""
-        target = self.target_select.currentText()
-        if not target:
-            QMessageBox.warning(self, "Traceroute Error", "Please select a target node first.")
-            return
-            
-        # Extract node ID from target text (format: "User (ID)" or just "ID")
-        node_id = target.split('(')[-1].rstrip(')') if '(' in target else target
+        method = self.connection_method.currentText()
+        address = self.connection_input.text().strip()
+        target = self.target_select.currentText().strip()
+        channel = self.channel_input.value()
         
+        if not target:
+            self.logWithTimestamp("No target selected for traceroute.")
+            return
+        
+        # Extract node ID from target text (look for ID in parentheses or use the whole target)
+        node_id_match = re.search(r'\(([^)]+)\)', target)
+        if node_id_match:
+            node_id = node_id_match.group(1)
+        else:
+            node_id = target.split()[-1]  # Use last word if no parentheses
+        
+        # Build command using subprocess args instead of shell=True to avoid quoting issues
+        cmd = ["meshtastic"]
+        
+        # Add connection parameters
+        if method == "Serial Port" and address:
+            cmd.extend(["--port", address])
+        elif method == "IP Address" and address:
+            cmd.extend(["--host", address])
+        elif method == "Bluetooth":
+            if address:
+                cmd.extend(["--ble", address])
+            else:
+                cmd.append("--ble")
+        
+        # Add traceroute command and target (using request-telemetry with dest)
+        cmd.extend(["--request-telemetry", "--dest", node_id])
+        
+        # Add channel if specified
+        if channel > 0:
+            cmd.extend(["--ch-index", str(channel)])
+        
+        # Disable button while running
+        self.traceroute_btn.setEnabled(False)
+        self.traceroute_btn.setText("Running...")
+        
+        # Queue the command
+        self.queueMeshtasticCommand(cmd, "traceroute")
+    
+    def onTracerouteOutput(self, output, node_id):
+        """Handle traceroute output and store it"""
+        import datetime
+        timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        self.results_display.append(f"[{timestamp}] Traceroute output: {output}")
+        
+        # Store traceroute history
+        if node_id not in self.traceroute_history:
+            self.traceroute_history[node_id] = []
+        
+        self.traceroute_history[node_id].append({
+            'timestamp': timestamp,
+            'output': output
+        })
+        
+        # Keep only last 10 entries per node
+        if len(self.traceroute_history[node_id]) > 10:
+            self.traceroute_history[node_id] = self.traceroute_history[node_id][-10:]
+        
+        # Save traceroute history
         try:
-            cmd = self.buildMeshtasticCommand("--traceroute", node_id)
-            self.results_display.append(f"Running traceroute to {target}: {' '.join(cmd)}")
-            # Here you would execute the command similar to onRefreshNodes
-            # For now, just show what would be executed
+            with open(self.traceroute_history_file, 'w') as f:
+                json.dump(self.traceroute_history, f, indent=2)
         except Exception as e:
-            self.results_display.append(f"Traceroute error: {str(e)}")
+            self.logWithTimestamp(f"Failed to save traceroute history: {str(e)}")
+    
+    def onTelemetryOutput(self, output, node_id):
+        """Handle telemetry output and store it"""
+        import datetime
+        timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        self.results_display.append(f"[{timestamp}] Telemetry output: {output}")
+        
+        # Store telemetry history
+        if node_id not in self.telemetry_history:
+            self.telemetry_history[node_id] = []
+        
+        self.telemetry_history[node_id].append({
+            'timestamp': timestamp,
+            'output': output
+        })
+        
+        # Keep only last 10 entries per node
+        if len(self.telemetry_history[node_id]) > 10:
+            self.telemetry_history[node_id] = self.telemetry_history[node_id][-10:]
+        
+        # Save telemetry history
+        try:
+            with open(self.telemetry_history_file, 'w') as f:
+                json.dump(self.telemetry_history, f, indent=2)
+        except Exception as e:
+            self.logWithTimestamp(f"Failed to save telemetry history: {str(e)}")
+    
+    def onWorkerFinished(self, worker):
+        """Handle worker completion"""
+        if worker in self.active_workers:
+            self.active_workers.remove(worker)
+        
+        # Re-enable buttons if no workers are running
+        if not self.active_workers:
+            self.traceroute_btn.setEnabled(True)
+            self.traceroute_btn.setText("Traceroute")
+            self.telemetry_btn.setEnabled(True)
+            self.telemetry_btn.setText("Get Telemetry")
+            import datetime
+            timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            self.results_display.append(f"[{timestamp}] Command completed.")
 
     def onRequestTelemetry(self):
         """Request telemetry"""
-        target = self.target_select.currentText()
-        if not target:
-            QMessageBox.warning(self, "Telemetry Error", "Please select a target node first.")
-            return
-            
-        # Extract node ID from target text
-        node_id = target.split('(')[-1].rstrip(')') if '(' in target else target
+        method = self.connection_method.currentText()
+        address = self.connection_input.text().strip()
+        target = self.target_select.currentText().strip()
+        channel = self.channel_input.value()
         
-        try:
-            cmd = self.buildMeshtasticCommand("--request-telemetry", node_id)
-            self.results_display.append(f"Requesting telemetry from {target}: {' '.join(cmd)}")
-            # Here you would execute the command similar to onRefreshNodes
-            # For now, just show what would be executed
-        except Exception as e:
-            self.results_display.append(f"Telemetry error: {str(e)}")
+        if not target:
+            self.logWithTimestamp("No target selected for telemetry.")
+            return
+        
+        # Extract node ID from target text (look for ID in parentheses or use the whole target)
+        node_id_match = re.search(r'\(([^)]+)\)', target)
+        if node_id_match:
+            node_id = node_id_match.group(1)
+        else:
+            node_id = target.split()[-1]  # Use last word if no parentheses
+        
+        # Build command using subprocess args instead of shell=True to avoid quoting issues
+        cmd = ["meshtastic"]
+        
+        # Add connection parameters
+        if method == "Serial Port" and address:
+            cmd.extend(["--port", address])
+        elif method == "IP Address" and address:
+            cmd.extend(["--host", address])
+        elif method == "Bluetooth":
+            if address:
+                cmd.extend(["--ble", address])
+            else:
+                cmd.append("--ble")
+        
+        # Add telemetry command and target
+        cmd.extend(["--request-telemetry", "--dest", node_id])
+        
+        # Add channel if specified
+        if channel > 0:
+            cmd.extend(["--ch-index", str(channel)])
+        
+        # Disable button while running
+        self.telemetry_btn.setEnabled(False)
+        self.telemetry_btn.setText("Running...")
+        
+        # Queue the command
+        self.queueMeshtasticCommand(cmd, "telemetry")
 
     def onSendMessage(self):
         """Send message"""
@@ -691,7 +1103,7 @@ class MeshtasticClientGUI(QWidget):
                 cmd = self.buildMeshtasticCommand("--sendtext", msg)
                 if channel > 0:
                     cmd.extend(["--ch-index", str(channel)])
-                self.results_display.append(f"Sending to channel {channel}: {msg}")
+                self.logWithTimestamp(f"Sending to channel {channel}: {msg}")
             else:  # To Node
                 target = self.target_select.currentText()
                 if not target:
@@ -705,15 +1117,15 @@ class MeshtasticClientGUI(QWidget):
                 if self.ack_cb.isChecked():
                     cmd.append("--request-ack")
                     
-                self.results_display.append(f"Sending to {target}: {msg}")
+                self.logWithTimestamp(f"Sending to {target}: {msg}")
             
-            self.results_display.append(f"Command: {' '.join(cmd)}")
+            self.logWithTimestamp(f"Command: {' '.join(cmd)}")
             # Here you would execute the command similar to onRefreshNodes
             # For now, just show what would be executed
             self.message_input.clear()
             
         except Exception as e:
-            self.results_display.append(f"Message send error: {str(e)}")
+            self.logWithTimestamp(f"Message send error: {str(e)}")
 
     def onClearLog(self):
         """Clear log"""
@@ -753,42 +1165,13 @@ class MeshtasticClientGUI(QWidget):
             QMessageBox.warning(self, "Refresh Error", "Please enter a valid device address or port.")
             return
             
-        now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        self.results_display.append(f"[{now}] Refreshing nodes from {method}: {address or 'auto-discover'}\n")
+        self.logWithTimestamp(f"Refreshing nodes from {method}: {address or 'auto-discover'}")
         
         try:
             cmd = self.buildMeshtasticCommand("--nodes")
-            process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-            output, error = process.communicate()
-            if error:
-                self.results_display.append(f"[{now}] Error: {error}\n")
-            if output:
-                self.results_display.append(f"[{now}] Nodes output:\n{output}\n")
-                nodes = self.parse_meshtastic_table_output(output)
-                
-                # Merge new nodes with existing discovered_nodes, preserving user data
-                for node in nodes:
-                    node_id = node.get('ID') or node.get('id') or str(len(self.discovered_nodes))
-                    if node_id in self.discovered_nodes:
-                        # Merge with existing data, keeping user preferences
-                        existing = self.discovered_nodes[node_id]
-                        # Only update if new data has newer timestamp or existing has no timestamp
-                        new_last_heard = node.get('LastHeard') or node.get('lastHeard') or ""
-                        existing_last_heard = existing.get('LastHeard') or existing.get('lastHeard') or ""
-                        
-                        if (new_last_heard and (not existing_last_heard or new_last_heard > existing_last_heard)):
-                            # Update with newer data but preserve user settings
-                            for key, value in node.items():
-                                existing[key] = value
-                        # else keep existing data as it's newer or equivalent
-                    else:
-                        # New node
-                        self.discovered_nodes[node_id] = node
-                
-                self.saveDiscoveredNodes()
-                self.update_nodes_table(nodes)
+            self.queueMeshtasticCommand(cmd, "nodes")
         except Exception as e:
-            self.results_display.append(f"Failed to refresh nodes: {str(e)}\n")
+            self.logWithTimestamp(f"Failed to queue refresh nodes command: {str(e)}")
 
     def parse_meshtastic_nodes_output(self, output):
         """Parse Meshtastic CLI output and return a list of node dicts."""
@@ -920,6 +1303,19 @@ class MeshtasticClientGUI(QWidget):
                     for col_idx, col_name in enumerate(columns):
                         if col_idx == 0:  # Favorite column - preserve existing
                             continue
+                        elif col_idx == 21:  # Source column - update with current connection
+                            method = self.connection_method.currentText()
+                            address = self.connection_input.text().strip()
+                            if method == "Bluetooth":
+                                source_text = f"BLE{': ' + address if address else ''}"
+                            elif method == "Serial Port":
+                                source_text = f"Serial{': ' + address if address else ''}"
+                            elif method == "IP Address":
+                                source_text = f"IP{': ' + address if address else ''}"
+                            else:
+                                source_text = "Unknown"
+                            item = QTableWidgetItem(source_text)
+                            self.nodes_table.setItem(row, col_idx, item)
                         elif col_idx == 22:  # Remark column - preserve existing
                             continue
                         else:
@@ -942,6 +1338,20 @@ class MeshtasticClientGUI(QWidget):
                         # Check if this node is in favorites
                         fav_text = "★" if node_id in self.favorite_nodes else ""
                         item = QTableWidgetItem(fav_text)
+                        self.nodes_table.setItem(row, col_idx, item)
+                    elif col_idx == 21:  # Source column  
+                        # Set the source based on current connection method
+                        method = self.connection_method.currentText()
+                        address = self.connection_input.text().strip()
+                        if method == "Bluetooth":
+                            source_text = f"BLE{': ' + address if address else ''}"
+                        elif method == "Serial Port":
+                            source_text = f"Serial{': ' + address if address else ''}"
+                        elif method == "IP Address":
+                            source_text = f"IP{': ' + address if address else ''}"
+                        else:
+                            source_text = "Unknown"
+                        item = QTableWidgetItem(source_text)
                         self.nodes_table.setItem(row, col_idx, item)
                     elif col_idx == 22:  # Remark column
                         # Check if we have a saved remark for this node
@@ -1011,23 +1421,33 @@ class MeshtasticClientGUI(QWidget):
             if filter_text:
                 row_text = ""
                 for col in [2, 3, 4, 5]:  # User, ID, AKA, Hardware columns
-                    if self.nodes_table.item(row, col):
-                        row_text += self.nodes_table.item(row, col).text().lower() + " "
-                
+                    item = self.nodes_table.item(row, col)
+                    if item:
+                        row_text += item.text().lower() + " "
                 if filter_text not in row_text:
                     show_row = False
             
             # Apply favorites filter
             if favorites_only and show_row:
-                node_id = self.nodes_table.item(row, 3).text() if self.nodes_table.item(row, 3) else None
-                if node_id not in self.favorite_nodes:
+                node_item = self.nodes_table.item(row, 3)
+                node_id = node_item.text() if node_item else None
+                if not node_id or node_id not in self.favorite_nodes:
                     show_row = False
             
             self.nodes_table.setRowHidden(row, not show_row)
         
         # Count visible rows
-        visible_count = sum(1 for row in range(self.nodes_table.rowCount()) if not self.nodes_table.isRowHidden(row))
+        visible_count = sum(1 for r in range(self.nodes_table.rowCount()) if not self.nodes_table.isRowHidden(r))
         self.results_display.append(f"Filter applied: {visible_count} of {self.nodes_table.rowCount()} nodes visible.")
+
+    def onResetFilters(self):
+        """Reset all filters and show all node rows"""
+        # Clear text filter and favorites-only checkbox
+        self.node_filter_input.clear()
+        self.favorites_only_cb.setChecked(False)
+        # Re-apply filter logic to reveal all rows
+        self.onNodeFilterChanged()
+        self.results_display.append("Filters reset.")
 
     def onShowColumnDialog(self):
         """Show dialog for column visibility management"""
@@ -1037,13 +1457,10 @@ class MeshtasticClientGUI(QWidget):
         dialog.resize(400, 500)
         
         layout = QVBoxLayout()
-        
-        # Add instructions
         instructions = QLabel("Select which columns to show in the nodes table:")
         instructions.setWordWrap(True)
         layout.addWidget(instructions)
         
-        # Get current column headers
         headers = []
         for i in range(self.nodes_table.columnCount()):
             header_item = self.nodes_table.horizontalHeaderItem(i)
@@ -1052,44 +1469,34 @@ class MeshtasticClientGUI(QWidget):
             else:
                 headers.append(f"Column {i}")
         
-        # Create checkboxes for each column
         self.column_checkboxes = {}
         for i, header in enumerate(headers):
             checkbox = QCheckBox(header)
             checkbox.setChecked(not self.nodes_table.isColumnHidden(i))
             self.column_checkboxes[i] = checkbox
             layout.addWidget(checkbox)
-        
-        # Add buttons
+
         button_layout = QHBoxLayout()
-        
         select_all_btn = QPushButton("Select All")
         select_all_btn.clicked.connect(lambda: self.setAllColumns(True))
         button_layout.addWidget(select_all_btn)
-        
         deselect_all_btn = QPushButton("Deselect All")
         deselect_all_btn.clicked.connect(lambda: self.setAllColumns(False))
         button_layout.addWidget(deselect_all_btn)
-        
         button_layout.addStretch()
-        
         ok_btn = QPushButton("OK")
         ok_btn.clicked.connect(lambda: self.applyColumnVisibility(dialog))
         ok_btn.setDefault(True)
         button_layout.addWidget(ok_btn)
-        
         cancel_btn = QPushButton("Cancel")
         cancel_btn.clicked.connect(dialog.reject)
         button_layout.addWidget(cancel_btn)
-        
         layout.addLayout(button_layout)
         dialog.setLayout(layout)
-        
-        # Show the dialog
         result = dialog.exec_()
         if result == QDialog.Accepted:
-            self.results_display.append("Column visibility updated.")
-    
+            self.logWithTimestamp("Column visibility updated.")
+
     def setAllColumns(self, visible):
         """Set all column checkboxes to visible or hidden"""
         if hasattr(self, 'column_checkboxes'):
@@ -1101,24 +1508,12 @@ class MeshtasticClientGUI(QWidget):
         if hasattr(self, 'column_checkboxes'):
             for col_index, checkbox in self.column_checkboxes.items():
                 self.nodes_table.setColumnHidden(col_index, not checkbox.isChecked())
-            
-            # Save column visibility to settings
-            self.column_visibility = {}
-            for col_index, checkbox in self.column_checkboxes.items():
-                header_item = self.nodes_table.horizontalHeaderItem(col_index)
-                if header_item:
-                    self.column_visibility[header_item.text()] = checkbox.isChecked()
-            
+            # Save visibility in settings
+            self.column_visibility = {self.nodes_table.horizontalHeaderItem(i).text(): not self.nodes_table.isColumnHidden(i)
+                                       for i in range(self.nodes_table.columnCount())}
             self.saveSettings()
-        
         dialog.accept()
-
-    def onResetFilters(self):
-        """Reset all filters and column visibility to default"""
-        self.node_filter_input.clear()
-        self.favorites_only_cb.setChecked(False)
-        self.results_display.append("Filters reset.")
-
+    
     def onNodeCellChanged(self, row, column):
         """Handle changes to node table cells, especially remarks"""
         node_id = self.nodes_table.item(row, 3).text() if self.nodes_table.item(row, 3) else None
@@ -1126,7 +1521,7 @@ class MeshtasticClientGUI(QWidget):
             remark = self.nodes_table.item(row, 22).text() if self.nodes_table.item(row, 22) else ""
             self.node_remarks[node_id] = remark
             self.saveNodeRemarks()
-            self.results_display.append(f"Remark updated for node {node_id}.")
+            self.logWithTimestamp(f"Remark updated for node {node_id}.")
 
     def onNodeCellClicked(self, row, column):
         """Handle cell clicks, especially for favorite column and location data"""
@@ -1149,7 +1544,40 @@ class MeshtasticClientGUI(QWidget):
                     item = QTableWidgetItem("★")
                     self.nodes_table.setItem(row, 0, item)
             self.saveFavorites()
-            self.results_display.append(f"Favorite toggled for node {node_id}.")
+            self.logWithTimestamp(f"Favorite toggled for node {node_id}.")
+        elif column == 7 or column == 8:  # Latitude or Longitude columns
+            # Open coordinates in map service
+            lat_item = self.nodes_table.item(row, 7)  # Latitude column
+            lon_item = self.nodes_table.item(row, 8)  # Longitude column
+            
+            if lat_item and lon_item:
+                lat = lat_item.text().strip()
+                lon = lon_item.text().strip()
+                
+                if lat and lon and lat != "0.0" and lon != "0.0":
+                    try:
+                        # Validate coordinates
+                        lat_float = float(lat)
+                        lon_float = float(lon)
+                        
+                        # Build map URL based on selected service
+                        service = self.location_service
+                        if service == "Google Maps":
+                            map_url = f"https://www.google.com/maps?q={lat},{lon}"
+                        elif service == "Bing Maps":
+                            map_url = f"https://www.bing.com/maps?cp={lat}~{lon}&lvl=16"
+                        else:  # OpenStreetMap (default)
+                            map_url = f"https://www.openstreetmap.org/?mlat={lat}&mlon={lon}&zoom=16"
+                        
+                        # Open in browser
+                        webbrowser.open(map_url)
+                        
+                        self.results_display.append(f"Opening {service} for coordinates: {lat}, {lon}")
+                        
+                    except ValueError:
+                        self.results_display.append(f"Invalid coordinates: {lat}, {lon}")
+                else:
+                    self.results_display.append("No valid coordinates to display.")
         else:
             # Set as target for any other column click
             if node_id:
@@ -1231,6 +1659,33 @@ class MeshtasticClientGUI(QWidget):
             self.results_display.append("Node remarks saved.")
         except Exception as e:
             self.results_display.append(f"Failed to save node remarks: {str(e)}")
+
+    def loadNodeRemarks(self):
+        try:
+            if os.path.exists(self.node_remarks_file):
+                with open(self.node_remarks_file, 'r') as f:
+                    self.node_remarks = json.load(f)
+        except Exception as e:
+            if hasattr(self, 'results_display'):
+                self.results_display.append(f"Failed to load node remarks: {str(e)}")
+
+    def loadTracerouteHistory(self):
+        try:
+            if os.path.exists(self.traceroute_history_file):
+                with open(self.traceroute_history_file, 'r') as f:
+                    self.traceroute_history = json.load(f)
+        except Exception as e:
+            if hasattr(self, 'results_display'):
+                self.results_display.append(f"Failed to load traceroute history: {str(e)}")
+
+    def loadTelemetryHistory(self):
+        try:
+            if os.path.exists(self.telemetry_history_file):
+                with open(self.telemetry_history_file, 'r') as f:
+                    self.telemetry_history = json.load(f)
+        except Exception as e:
+            if hasattr(self, 'results_display'):
+                self.results_display.append(f"Failed to load telemetry history: {str(e)}")
 
     def saveConnectionPresets(self):
         try:
@@ -1356,10 +1811,15 @@ class MeshtasticClientGUI(QWidget):
                 self.results_display.append("--- End of Report ---\n")
     
     def onToggleConfigVisibility(self):
-        """Toggle configuration visibility"""
-        visible = not self.config_scroll.isVisible()
-        self.config_scroll.setVisible(visible)
-        self.toggle_config_btn.setText("\u25BC Hide Configuration" if visible else "\u25B6 Show Configuration")
+        """Toggle the visibility of the configuration editor."""
+        if hasattr(self, 'config_scroll'):
+            visible = self.config_scroll.isVisible()
+            self.config_scroll.setVisible(not visible)
+            if not visible:
+                self.toggle_config_btn.setText("▼ Hide Configuration")
+            else:
+                self.toggle_config_btn.setText("▶ Show Configuration")
+            self.results_display.append(f"Configuration editor {'shown' if not visible else 'hidden'}.")
     
     def onMessageTypeChanged(self, msg_type):
         """Handle message type change"""
@@ -1388,22 +1848,6 @@ class MeshtasticClientGUI(QWidget):
         """Load device connections for smart preset matching"""
         # Real device connections load logic could be added here
         pass
-
-    def onToggleConfigVisibility(self):
-        """Toggle the visibility of the configuration editor."""
-        if hasattr(self, 'config_scroll'):
-            visible = self.config_scroll.isVisible()
-            self.config_scroll.setVisible(not visible)
-            if not visible:
-                self.toggle_config_btn.setText("▼ Hide Configuration")
-            else:
-                self.toggle_config_btn.setText("▶ Show Configuration")
-            self.results_display.append(f"Configuration editor {'shown' if not visible else 'hidden'}.")
-
-    def onMessageTypeChanged(self, text):
-        """Handle changes to the message type selector."""
-        # You can add logic here to enable/disable fields based on message type
-        self.results_display.append(f"Message type changed to: {text}")
 
 # Main execution
 if __name__ == "__main__":
