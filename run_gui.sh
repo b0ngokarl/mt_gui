@@ -4,4 +4,4 @@
 
 cd "$(dirname "$0")"
 export QT_QPA_PLATFORM=xcb
-/home/jo/mt_gui/.venv/bin/python meshtastic_gui.py
+python3 meshtastic_gui.py
