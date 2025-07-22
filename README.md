@@ -2,7 +2,7 @@
 
 Eine erweiterte grafische Benutzeroberfläche für Meshtastic-Geräte mit verbesserter Logging-Funktionalität, präzisen Timestamps und optimierter Prozessverwaltung.
 
-## 🎉 Latest Major Updates *(January 2025)*
+## 🎉 Latest Major Updates *(July 2025)*
 
 ### **🔧 Complete Application Stability Fix**
 - **Issue**: GUI failing to start due to missing method implementations
