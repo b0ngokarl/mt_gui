@@ -12,7 +12,7 @@ from PyQt5.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout,
                              QGroupBox, QComboBox, QLineEdit, QPushButton, 
                              QLabel, QMessageBox, QFileDialog, QTableWidget,
                              QTableWidgetItem, QTextEdit, QSpinBox, QCheckBox, QDialog, 
-                             QScrollArea, QDoubleSpinBox)
+                             QScrollArea, QDoubleSpinBox, QInputDialog)
 from PyQt5.QtCore import QThread, pyqtSignal
 from PyQt5.QtGui import QColor
 
@@ -459,7 +459,16 @@ class MeshtasticClientGUI(QWidget):
     
     def onConnectionMethodChanged(self, method):
         """Handle connection method change"""
-        pass
+        # Update label and placeholder for connection input
+        if method == "Serial Port":
+            self.connection_label.setText("Port:")
+            self.connection_input.setPlaceholderText("e.g., /dev/ttyUSB0")
+        elif method == "IP Address":
+            self.connection_label.setText("IP:")
+            self.connection_input.setPlaceholderText("e.g., 192.168.1.100")
+        elif method == "Bluetooth":
+            self.connection_label.setText("BT Addr:")
+            self.connection_input.setPlaceholderText("e.g., 00:11:22:33:44:55")
     
     def onLocationServiceChanged(self, service):
         """Handle location service change"""
@@ -537,15 +546,39 @@ class MeshtasticClientGUI(QWidget):
     
     def onPresetChanged(self, preset):
         """Handle preset change"""
-        pass
+        # Load preset details into fields
+        if preset:
+            for name, data in self.connection_presets.items():
+                display_text = f"{name} ({data['method']}: {data['address']})"
+                if display_text == preset:
+                    self.connection_method.setCurrentText(data['method'])
+                    self.connection_input.setText(data['address'])
+                    self.remark_input.setText(data.get('remark', ""))
+                    break
     
     def onSavePreset(self):
         """Save current connection as preset"""
-        pass
+        name, ok = QInputDialog.getText(self, "Save Preset", "Preset name:")
+        if ok and name:
+            self.connection_presets[name] = {
+                "method": self.connection_method.currentText(),
+                "address": self.connection_input.text(),
+                "remark": self.remark_input.text()
+            }
+            self.updatePresetCombo()
+            QMessageBox.information(self, "Preset Saved", f"Preset '{name}' saved.")
     
     def onDeletePreset(self):
         """Delete selected preset"""
-        pass
+        preset = self.connection_preset.currentText()
+        if preset:
+            for name in list(self.connection_presets.keys()):
+                display_text = f"{name} ({self.connection_presets[name]['method']}: {self.connection_presets[name]['address']})"
+                if display_text == preset:
+                    del self.connection_presets[name]
+                    self.updatePresetCombo()
+                    QMessageBox.information(self, "Preset Deleted", f"Preset '{name}' deleted.")
+                    break
     
     def updatePresetCombo(self):
         """Update the preset combo box with current presets"""
@@ -566,51 +599,67 @@ class MeshtasticClientGUI(QWidget):
     
     def onConnect(self):
         """Connect to device"""
-        pass
+        self.connect_btn.setEnabled(False)
+        self.disconnect_btn.setEnabled(True)
+        self.reboot_btn.setEnabled(True)
+        self.results_display.append("Connected to device (simulated).")
     
     def onDisconnect(self):
         """Disconnect from device"""
-        pass
+        self.connect_btn.setEnabled(True)
+        self.disconnect_btn.setEnabled(False)
+        self.reboot_btn.setEnabled(False)
+        self.results_display.append("Disconnected from device (simulated).")
     
     def onReboot(self):
         """Reboot device"""
-        pass
+        QMessageBox.information(self, "Reboot", "Device rebooted (simulated).")
     
     def onKillAllMeshtastic(self):
         """Kill all meshtastic processes"""
-        pass
+        QMessageBox.information(self, "Kill All", "All Meshtastic processes killed (simulated).")
     
     def onLoadConfig(self):
         """Load configuration"""
-        pass
+        QMessageBox.information(self, "Load Config", "Configuration loaded (simulated).")
     
     def onSaveConfig(self):
         """Save configuration"""
-        pass
+        QMessageBox.information(self, "Save Config", "Configuration saved (simulated).")
     
     def onResetConfig(self):
         """Reset configuration"""
-        pass
+        QMessageBox.information(self, "Reset Config", "Configuration reset (simulated).")
     
     def onToggleConfigVisibility(self):
         """Toggle configuration visibility"""
-        pass
+        visible = not self.config_scroll.isVisible()
+        self.config_scroll.setVisible(visible)
+        self.toggle_config_btn.setText("\u25BC Hide Configuration" if visible else "\u25B6 Show Configuration")
     
     def onTraceroute(self):
         """Perform traceroute"""
-        pass
+        QMessageBox.information(self, "Traceroute", "Traceroute performed (simulated).")
     
     def onRequestTelemetry(self):
         """Request telemetry"""
-        pass
+        QMessageBox.information(self, "Telemetry", "Telemetry requested (simulated).")
     
     def onMessageTypeChanged(self, msg_type):
         """Handle message type change"""
-        pass
+        if msg_type == "To Channel":
+            self.ack_cb.setEnabled(False)
+        else:
+            self.ack_cb.setEnabled(True)
     
     def onSendMessage(self):
         """Send message"""
-        pass
+        msg = self.message_input.text()
+        if not msg:
+            QMessageBox.warning(self, "Send Message", "Message cannot be empty.")
+            return
+        self.results_display.append(f"Message sent: {msg} (simulated)")
+        self.message_input.clear()
     
     def onClearLog(self):
         """Clear log"""
@@ -619,55 +668,74 @@ class MeshtasticClientGUI(QWidget):
     
     def onRefreshNodes(self):
         """Refresh nodes list"""
-        pass
+        self.results_display.append("Nodes list refreshed (simulated).")
     
     def onDeleteSelectedNode(self):
         """Delete the currently selected node from the discovered nodes list"""
-        pass
+        row = self.nodes_table.currentRow()
+        if row >= 0:
+            self.nodes_table.removeRow(row)
+            self.results_display.append(f"Node at row {row} deleted (simulated).")
     
     def onExportCSV(self):
         """Export node data to CSV file"""
-        pass
+        file_path, _ = QFileDialog.getSaveFileName(self, "Export CSV", "nodes.csv", "CSV Files (*.csv)")
+        if file_path:
+            try:
+                with open(file_path, 'w', newline='') as f:
+                    writer = csv.writer(f)
+                    writer.writerow([self.nodes_table.horizontalHeaderItem(i).text() for i in range(self.nodes_table.columnCount())])
+                    for row in range(self.nodes_table.rowCount()):
+                        writer.writerow([self.nodes_table.item(row, col).text() if self.nodes_table.item(row, col) else "" for col in range(self.nodes_table.columnCount())])
+                QMessageBox.information(self, "Export CSV", f"Nodes exported to {file_path}")
+            except Exception as e:
+                QMessageBox.warning(self, "Export Error", f"Failed to export CSV: {str(e)}")
     
     def checkDataConsistency(self):
         """Check data consistency between JSON storage, GUI display, and CSV export"""
-        pass
+        QMessageBox.information(self, "Check Data", "Data consistency check complete (simulated).")
     
     def onResetNodesList(self):
         """Reset the nodes list"""
-        pass
+        self.nodes_table.setRowCount(0)
+        self.results_display.append("Nodes list reset (simulated).")
     
     def onNodeFilterChanged(self):
         """Apply text filter and favorites filter to the node table"""
-        pass
+        # Simulated filter: just show message
+        self.results_display.append("Node filter applied (simulated).")
     
     def onShowColumnDialog(self):
         """Show dialog for column visibility management"""
-        pass
+        QMessageBox.information(self, "Column Visibility", "Show/Hide columns dialog (simulated).")
     
     def onResetFilters(self):
         """Reset all filters and column visibility to default"""
-        pass
+        self.node_filter_input.clear()
+        self.favorites_only_cb.setChecked(False)
+        self.results_display.append("Filters reset (simulated).")
     
     def onNodeCellChanged(self, row, column):
         """Handle changes to node table cells, especially remarks"""
-        pass
+        self.results_display.append(f"Cell changed at row {row}, column {column} (simulated).")
     
     def onNodeCellClicked(self, row, column):
         """Handle cell clicks, especially for favorite column and location data"""
-        pass
+        self.results_display.append(f"Cell clicked at row {row}, column {column} (simulated).")
     
     def onNodeCellDoubleClicked(self, row, column):
         """Handle double-clicks for detailed traceroute view"""
-        pass
+        QMessageBox.information(self, "Traceroute Details", f"Detailed traceroute for row {row}, column {column} (simulated).")
     
     def loadSettings(self):
         """Load all settings and data from files"""
-        pass
+        # Simulated load
+        self.results_display.append("Settings loaded (simulated).")
     
     def loadDeviceConnections(self):
         """Load device connections for smart preset matching"""
-        pass
+        # Simulated load
+        self.results_display.append("Device connections loaded (simulated).")
 
     # Missing method implementations
 
