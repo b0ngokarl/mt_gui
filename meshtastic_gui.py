@@ -2,19 +2,14 @@ import sys
 import json
 import os
 import subprocess
-import threading
 import datetime
-import time
-import webbrowser
-import re
 import csv
 from PyQt5.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout, 
                              QGroupBox, QComboBox, QLineEdit, QPushButton, 
                              QLabel, QMessageBox, QFileDialog, QTableWidget,
-                             QTableWidgetItem, QTextEdit, QSpinBox, QCheckBox, QDialog, 
-                             QScrollArea, QDoubleSpinBox, QInputDialog)
+                             QTableWidgetItem, QTextEdit, QSpinBox, QCheckBox, 
+                             QScrollArea, QDialog)
 from PyQt5.QtCore import QThread, pyqtSignal
-from PyQt5.QtGui import QColor
 
 class CommandWorker(QThread):
     output_ready = pyqtSignal(str)
@@ -27,10 +22,13 @@ class CommandWorker(QThread):
     
     def run(self):
         try:
-            # Execute the command
+            # Execute the command securely (avoid shell=True)
+            if isinstance(self.command, str):
+                cmd = self.command.split()
+            else:
+                cmd = self.command
             process = subprocess.Popen(
-                self.command,
-                shell=True,
+                cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
@@ -91,6 +89,8 @@ class MeshtasticClientGUI(QWidget):
         
         self.initUI()
         self.loadSettings()
+        self.loadConnectionPresets()
+        self.loadDiscoveredNodes()
         
         # Load device connections for smart preset matching
         self.loadDeviceConnections()
@@ -160,16 +160,6 @@ class MeshtasticClientGUI(QWidget):
         
         # Connection buttons - more compact
         button_layout = QHBoxLayout()
-        self.connect_btn = QPushButton("Connect")
-        self.connect_btn.clicked.connect(self.onConnect)
-        self.connect_btn.setMaximumWidth(80)
-        button_layout.addWidget(self.connect_btn)
-        
-        self.disconnect_btn = QPushButton("Disconnect")
-        self.disconnect_btn.clicked.connect(self.onDisconnect)
-        self.disconnect_btn.setEnabled(False)
-        self.disconnect_btn.setMaximumWidth(80)
-        button_layout.addWidget(self.disconnect_btn)
         
         # Settings buttons - more compact
         self.save_btn = QPushButton("Save")
@@ -182,12 +172,11 @@ class MeshtasticClientGUI(QWidget):
         self.load_btn.setMaximumWidth(60)
         button_layout.addWidget(self.load_btn)
         
-        # Reboot button
+        # Reboot button - always enabled since CLI handles connection
         self.reboot_btn = QPushButton("Reboot")
         self.reboot_btn.clicked.connect(self.onReboot)
         self.reboot_btn.setMaximumWidth(60)
-        self.reboot_btn.setEnabled(False)  # Initially disabled
-        self.reboot_btn.setToolTip("Reboot the connected device")
+        self.reboot_btn.setToolTip("Reboot the connected device using CLI")
         button_layout.addWidget(self.reboot_btn)
         
         # Kill All Processes button
@@ -489,7 +478,8 @@ class MeshtasticClientGUI(QWidget):
             "remark": self.remark_input.text() if hasattr(self, 'remark_input') else "",
             "default_channel": self.channel_input.value() if hasattr(self, 'channel_input') else 0,
             "location_service": getattr(self, 'location_service', 'OpenStreetMap'),
-            "node_remarks": getattr(self, 'node_remarks', {})
+            "node_remarks": getattr(self, 'node_remarks', {}),
+            "column_visibility": getattr(self, 'column_visibility', {})
         }
         
         try:
@@ -607,31 +597,25 @@ class MeshtasticClientGUI(QWidget):
             if index >= 0:
                 self.connection_preset.setCurrentIndex(index)
     
-    def onConnect(self):
-        """Connect to the selected device using the chosen method."""
-        method = self.connection_method.currentText()
-        address = self.connection_input.text().strip()
-        if not address:
-            QMessageBox.warning(self, "Connection Error", "Please enter a valid device address or port.")
-            return
-        self.results_display.append(f"Connecting via {method}: {address}\n")
-        self.connect_btn.setEnabled(False)
-        self.disconnect_btn.setEnabled(True)
-        self.reboot_btn.setEnabled(True)
-        # Save last used connection
-        self.saveSettings()
-
-    def onDisconnect(self):
-        """Disconnect from device"""
-        self.connect_btn.setEnabled(True)
-        self.disconnect_btn.setEnabled(False)
-        self.reboot_btn.setEnabled(False)
-        self.results_display.append("Disconnected from device.")
-
     def onReboot(self):
-        """Reboot device"""
-        # Real reboot logic could be added here
-        self.results_display.append("Device rebooted.")
+        """Reboot device using Meshtastic CLI"""
+        try:
+            cmd = self.buildMeshtasticCommand("--reboot")
+            self.results_display.append(f"Rebooting device: {' '.join(cmd)}")
+            
+            # Execute the reboot command
+            process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            output, error = process.communicate()
+            
+            if error:
+                self.results_display.append(f"Reboot error: {error}")
+            if output:
+                self.results_display.append(f"Reboot output: {output}")
+            
+            self.results_display.append("Device reboot command sent.")
+            
+        except Exception as e:
+            self.results_display.append(f"Reboot error: {str(e)}")
 
     def onKillAllMeshtastic(self):
         """Kill all meshtastic processes"""
@@ -658,59 +642,153 @@ class MeshtasticClientGUI(QWidget):
 
     def onTraceroute(self):
         """Perform traceroute"""
-        # Real traceroute logic could be added here
-        self.results_display.append("Traceroute performed.")
+        target = self.target_select.currentText()
+        if not target:
+            QMessageBox.warning(self, "Traceroute Error", "Please select a target node first.")
+            return
+            
+        # Extract node ID from target text (format: "User (ID)" or just "ID")
+        node_id = target.split('(')[-1].rstrip(')') if '(' in target else target
+        
+        try:
+            cmd = self.buildMeshtasticCommand("--traceroute", node_id)
+            self.results_display.append(f"Running traceroute to {target}: {' '.join(cmd)}")
+            # Here you would execute the command similar to onRefreshNodes
+            # For now, just show what would be executed
+        except Exception as e:
+            self.results_display.append(f"Traceroute error: {str(e)}")
 
     def onRequestTelemetry(self):
         """Request telemetry"""
-        # Real telemetry logic could be added here
-        self.results_display.append("Telemetry requested.")
+        target = self.target_select.currentText()
+        if not target:
+            QMessageBox.warning(self, "Telemetry Error", "Please select a target node first.")
+            return
+            
+        # Extract node ID from target text
+        node_id = target.split('(')[-1].rstrip(')') if '(' in target else target
+        
+        try:
+            cmd = self.buildMeshtasticCommand("--request-telemetry", node_id)
+            self.results_display.append(f"Requesting telemetry from {target}: {' '.join(cmd)}")
+            # Here you would execute the command similar to onRefreshNodes
+            # For now, just show what would be executed
+        except Exception as e:
+            self.results_display.append(f"Telemetry error: {str(e)}")
 
     def onSendMessage(self):
         """Send message"""
-        msg = self.message_input.text()
+        msg = self.message_input.text().strip()
         if not msg:
             QMessageBox.warning(self, "Send Message", "Message cannot be empty.")
             return
-        # Real message send logic could be added here
-        self.results_display.append(f"Message sent: {msg}")
-        self.message_input.clear()
+        
+        message_type = self.message_type.currentText()
+        channel = self.channel_input.value()
+        
+        try:
+            if message_type == "To Channel":
+                cmd = self.buildMeshtasticCommand("--sendtext", msg)
+                if channel > 0:
+                    cmd.extend(["--ch-index", str(channel)])
+                self.results_display.append(f"Sending to channel {channel}: {msg}")
+            else:  # To Node
+                target = self.target_select.currentText()
+                if not target:
+                    QMessageBox.warning(self, "Send Message", "Please select a target node first.")
+                    return
+                
+                # Extract node ID from target text
+                node_id = target.split('(')[-1].rstrip(')') if '(' in target else target
+                
+                cmd = self.buildMeshtasticCommand("--sendtext", msg, "--dest", node_id)
+                if self.ack_cb.isChecked():
+                    cmd.append("--request-ack")
+                    
+                self.results_display.append(f"Sending to {target}: {msg}")
+            
+            self.results_display.append(f"Command: {' '.join(cmd)}")
+            # Here you would execute the command similar to onRefreshNodes
+            # For now, just show what would be executed
+            self.message_input.clear()
+            
+        except Exception as e:
+            self.results_display.append(f"Message send error: {str(e)}")
 
     def onClearLog(self):
         """Clear log"""
         if hasattr(self, 'results_display'):
             self.results_display.clear()
 
+    def buildMeshtasticCommand(self, *args):
+        """Build a meshtastic command with proper connection parameters based on current settings."""
+        method = self.connection_method.currentText()
+        address = self.connection_input.text().strip()
+        
+        cmd = ["meshtastic"]
+        
+        # Add connection parameters based on method
+        if method == "Serial Port" and address:
+            cmd.extend(["--port", address])
+        elif method == "IP Address" and address:
+            cmd.extend(["--host", address])
+        elif method == "Bluetooth":
+            if address:
+                cmd.extend(["--ble", address])
+            else:
+                cmd.append("--ble")
+        
+        # Add the requested arguments
+        cmd.extend(args)
+        
+        return cmd
+
     def onRefreshNodes(self):
         """Refresh the node list from the actual device using Meshtastic CLI."""
         method = self.connection_method.currentText()
         address = self.connection_input.text().strip()
-        if not address:
+        
+        # For Bluetooth, address is optional (can auto-discover)
+        if method != "Bluetooth" and not address:
             QMessageBox.warning(self, "Refresh Error", "Please enter a valid device address or port.")
             return
+            
         now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        self.results_display.append(f"[{now}] Refreshing nodes from {method}: {address}\n")
+        self.results_display.append(f"[{now}] Refreshing nodes from {method}: {address or 'auto-discover'}\n")
+        
         try:
-            if method == "Serial Port":
-                cmd = f"meshtastic --port {address} --nodes"
-            elif method == "IP Address":
-                cmd = f"meshtastic --host {address} --nodes"
-            else:
-                cmd = f"meshtastic --nodes"
-            process = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            cmd = self.buildMeshtasticCommand("--nodes")
+            process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             output, error = process.communicate()
             if error:
                 self.results_display.append(f"[{now}] Error: {error}\n")
             if output:
                 self.results_display.append(f"[{now}] Nodes output:\n{output}\n")
                 nodes = self.parse_meshtastic_table_output(output)
-                self.discovered_nodes = {node.get('ID', str(i)): node for i, node in enumerate(nodes)}
+                
+                # Merge new nodes with existing discovered_nodes, preserving user data
+                for node in nodes:
+                    node_id = node.get('ID') or node.get('id') or str(len(self.discovered_nodes))
+                    if node_id in self.discovered_nodes:
+                        # Merge with existing data, keeping user preferences
+                        existing = self.discovered_nodes[node_id]
+                        # Only update if new data has newer timestamp or existing has no timestamp
+                        new_last_heard = node.get('LastHeard') or node.get('lastHeard') or ""
+                        existing_last_heard = existing.get('LastHeard') or existing.get('lastHeard') or ""
+                        
+                        if (new_last_heard and (not existing_last_heard or new_last_heard > existing_last_heard)):
+                            # Update with newer data but preserve user settings
+                            for key, value in node.items():
+                                existing[key] = value
+                        # else keep existing data as it's newer or equivalent
+                    else:
+                        # New node
+                        self.discovered_nodes[node_id] = node
+                
                 self.saveDiscoveredNodes()
                 self.update_nodes_table(nodes)
         except Exception as e:
             self.results_display.append(f"Failed to refresh nodes: {str(e)}\n")
-        self.connect_btn.setEnabled(True)
-        self.disconnect_btn.setEnabled(False)
 
     def parse_meshtastic_nodes_output(self, output):
         """Parse Meshtastic CLI output and return a list of node dicts."""
@@ -763,19 +841,126 @@ class MeshtasticClientGUI(QWidget):
         return nodes
 
     def update_nodes_table(self, nodes):
-        """Update the node table with parsed node data."""
-        self.nodes_table.setRowCount(0)
+        """Update the node table with parsed node data, preserving existing data and only updating with newer info."""
+        import datetime
+        
+        def parse_last_heard(last_heard_str):
+            """Parse last heard time to datetime for comparison."""
+            if not last_heard_str or last_heard_str.strip() == "":
+                return None
+            try:
+                # Try different formats
+                formats = [
+                    "%Y-%m-%d %H:%M:%S",
+                    "%H:%M:%S",
+                    "%Y-%m-%d",
+                    "%m-%d %H:%M",
+                ]
+                for fmt in formats:
+                    try:
+                        return datetime.datetime.strptime(last_heard_str.strip(), fmt)
+                    except ValueError:
+                        continue
+                # If no format works, assume it's recent
+                return datetime.datetime.now()
+            except:
+                return None
+        
+        # Build a mapping of existing nodes from the table
+        existing_nodes = {}
+        for row in range(self.nodes_table.rowCount()):
+            node_id_item = self.nodes_table.item(row, 3)  # ID column
+            if node_id_item and node_id_item.text():
+                node_id = node_id_item.text()
+                existing_nodes[node_id] = {
+                    'row': row,
+                    'favorite': self.nodes_table.item(row, 0).text() if self.nodes_table.item(row, 0) else "",
+                    'last_heard': self.nodes_table.item(row, 16).text() if self.nodes_table.item(row, 16) else "",
+                    'remark': self.nodes_table.item(row, 22).text() if self.nodes_table.item(row, 22) else ""
+                }
+        
         columns = [
-            "Fav", "N", "User", "ID", "AKA", "Hardware", "Role", "Latitude", "Longitude", "Altitude", "Battery", "Channel util.", "Tx air util.", "SNR", "Hops", "Channel", "LastHeard", "Since", "Traceroutes", "Telemetry", "Pubkey", "Source", "Remark"
+            "Fav", "N", "User", "ID", "AKA", "Hardware", "Role", "Latitude", "Longitude", "Altitude",
+            "Battery", "Channel util.", "Tx air util.", "SNR", "Hops", "Channel", "LastHeard", "Since",
+            "Traceroutes", "Telemetry", "Pubkey", "Source", "Remark"
         ]
+        
+        updated_count = 0
+        new_count = 0
+        preserved_count = 0
+        
+        # Process new nodes
         for node in nodes:
-            row = self.nodes_table.rowCount()
-            self.nodes_table.insertRow(row)
-            for col_idx, col_name in enumerate(columns):
-                value = node.get(col_name) or node.get(col_name.replace(" ", "")) or node.get(col_name.lower()) or ""
-                item = QTableWidgetItem(str(value))
-                self.nodes_table.setItem(row, col_idx, item)
-        self.results_display.append(f"Node table updated with {len(nodes)} nodes.")
+            node_id = node.get('ID') or node.get('id') or ""
+            if not node_id:
+                continue
+                
+            new_last_heard = node.get('LastHeard') or node.get('lastHeard') or ""
+            
+            if node_id in existing_nodes:
+                # Node exists - check if we should update
+                existing = existing_nodes[node_id]
+                existing_last_heard = existing['last_heard']
+                
+                # Parse timestamps for comparison
+                new_time = parse_last_heard(new_last_heard)
+                existing_time = parse_last_heard(existing_last_heard)
+                
+                should_update = False
+                if new_time and existing_time:
+                    should_update = new_time > existing_time
+                elif new_time and not existing_time:
+                    should_update = True
+                elif new_last_heard and not existing_last_heard:
+                    should_update = True
+                
+                if should_update:
+                    # Update existing row with newer data, but preserve user data
+                    row = existing['row']
+                    for col_idx, col_name in enumerate(columns):
+                        if col_idx == 0:  # Favorite column - preserve existing
+                            continue
+                        elif col_idx == 22:  # Remark column - preserve existing
+                            continue
+                        else:
+                            # Update with new data
+                            value = node.get(col_name) or node.get(col_name.replace(" ", "")) or node.get(col_name.lower()) or ""
+                            item = QTableWidgetItem(str(value))
+                            self.nodes_table.setItem(row, col_idx, item)
+                    updated_count += 1
+                else:
+                    preserved_count += 1
+                    
+                # Remove from existing_nodes so we know it was processed
+                del existing_nodes[node_id]
+            else:
+                # New node - add it
+                row = self.nodes_table.rowCount()
+                self.nodes_table.insertRow(row)
+                for col_idx, col_name in enumerate(columns):
+                    if col_idx == 0:  # Favorite column
+                        # Check if this node is in favorites
+                        fav_text = "★" if node_id in self.favorite_nodes else ""
+                        item = QTableWidgetItem(fav_text)
+                        self.nodes_table.setItem(row, col_idx, item)
+                    elif col_idx == 22:  # Remark column
+                        # Check if we have a saved remark for this node
+                        remark_text = self.node_remarks.get(node_id, "")
+                        item = QTableWidgetItem(remark_text)
+                        self.nodes_table.setItem(row, col_idx, item)
+                    else:
+                        value = node.get(col_name) or node.get(col_name.replace(" ", "")) or node.get(col_name.lower()) or ""
+                        item = QTableWidgetItem(str(value))
+                        self.nodes_table.setItem(row, col_idx, item)
+                new_count += 1
+        
+        # Report results
+        total_nodes = len(nodes)
+        if total_nodes >= 100:
+            self.results_display.append(f"⚠️  Node list may be limited to {total_nodes} nodes by device/CLI.")
+            self.results_display.append("   Consider using '--nodes --limit 0' or check device settings for full list.")
+            
+        self.results_display.append(f"Node table updated: {new_count} new, {updated_count} updated, {preserved_count} preserved (total: {self.nodes_table.rowCount()} nodes).")
 
     def onDeleteSelectedNode(self):
         """Delete the currently selected node from the discovered nodes list"""
@@ -816,13 +1001,117 @@ class MeshtasticClientGUI(QWidget):
 
     def onNodeFilterChanged(self):
         """Apply text filter and favorites filter to the node table"""
-        # Real filter logic could be added here
-        self.results_display.append("Node filter applied.")
+        filter_text = self.node_filter_input.text().lower()
+        favorites_only = self.favorites_only_cb.isChecked()
+        
+        for row in range(self.nodes_table.rowCount()):
+            show_row = True
+            
+            # Apply text filter
+            if filter_text:
+                row_text = ""
+                for col in [2, 3, 4, 5]:  # User, ID, AKA, Hardware columns
+                    if self.nodes_table.item(row, col):
+                        row_text += self.nodes_table.item(row, col).text().lower() + " "
+                
+                if filter_text not in row_text:
+                    show_row = False
+            
+            # Apply favorites filter
+            if favorites_only and show_row:
+                node_id = self.nodes_table.item(row, 3).text() if self.nodes_table.item(row, 3) else None
+                if node_id not in self.favorite_nodes:
+                    show_row = False
+            
+            self.nodes_table.setRowHidden(row, not show_row)
+        
+        # Count visible rows
+        visible_count = sum(1 for row in range(self.nodes_table.rowCount()) if not self.nodes_table.isRowHidden(row))
+        self.results_display.append(f"Filter applied: {visible_count} of {self.nodes_table.rowCount()} nodes visible.")
 
     def onShowColumnDialog(self):
         """Show dialog for column visibility management"""
-        # Real column dialog logic could be added here
-        self.results_display.append("Show/Hide columns dialog.")
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Show/Hide Columns")
+        dialog.setModal(True)
+        dialog.resize(400, 500)
+        
+        layout = QVBoxLayout()
+        
+        # Add instructions
+        instructions = QLabel("Select which columns to show in the nodes table:")
+        instructions.setWordWrap(True)
+        layout.addWidget(instructions)
+        
+        # Get current column headers
+        headers = []
+        for i in range(self.nodes_table.columnCount()):
+            header_item = self.nodes_table.horizontalHeaderItem(i)
+            if header_item:
+                headers.append(header_item.text())
+            else:
+                headers.append(f"Column {i}")
+        
+        # Create checkboxes for each column
+        self.column_checkboxes = {}
+        for i, header in enumerate(headers):
+            checkbox = QCheckBox(header)
+            checkbox.setChecked(not self.nodes_table.isColumnHidden(i))
+            self.column_checkboxes[i] = checkbox
+            layout.addWidget(checkbox)
+        
+        # Add buttons
+        button_layout = QHBoxLayout()
+        
+        select_all_btn = QPushButton("Select All")
+        select_all_btn.clicked.connect(lambda: self.setAllColumns(True))
+        button_layout.addWidget(select_all_btn)
+        
+        deselect_all_btn = QPushButton("Deselect All")
+        deselect_all_btn.clicked.connect(lambda: self.setAllColumns(False))
+        button_layout.addWidget(deselect_all_btn)
+        
+        button_layout.addStretch()
+        
+        ok_btn = QPushButton("OK")
+        ok_btn.clicked.connect(lambda: self.applyColumnVisibility(dialog))
+        ok_btn.setDefault(True)
+        button_layout.addWidget(ok_btn)
+        
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(dialog.reject)
+        button_layout.addWidget(cancel_btn)
+        
+        layout.addLayout(button_layout)
+        dialog.setLayout(layout)
+        
+        # Show the dialog
+        result = dialog.exec_()
+        if result == QDialog.Accepted:
+            self.results_display.append("Column visibility updated.")
+    
+    def setAllColumns(self, visible):
+        """Set all column checkboxes to visible or hidden"""
+        if hasattr(self, 'column_checkboxes'):
+            for checkbox in self.column_checkboxes.values():
+                checkbox.setChecked(visible)
+    
+    def applyColumnVisibility(self, dialog):
+        """Apply the column visibility settings from the dialog"""
+        if hasattr(self, 'column_checkboxes'):
+            for col_index, checkbox in self.column_checkboxes.items():
+                self.nodes_table.setColumnHidden(col_index, not checkbox.isChecked())
+            
+            # Save column visibility to settings
+            self.column_visibility = {}
+            for col_index, checkbox in self.column_checkboxes.items():
+                header_item = self.nodes_table.horizontalHeaderItem(col_index)
+                if header_item:
+                    self.column_visibility[header_item.text()] = checkbox.isChecked()
+            
+            self.saveSettings()
+        
+        dialog.accept()
 
     def onResetFilters(self):
         """Reset all filters and column visibility to default"""
@@ -842,14 +1131,45 @@ class MeshtasticClientGUI(QWidget):
     def onNodeCellClicked(self, row, column):
         """Handle cell clicks, especially for favorite column and location data"""
         node_id = self.nodes_table.item(row, 3).text() if self.nodes_table.item(row, 3) else None
+        node_user = self.nodes_table.item(row, 2).text() if self.nodes_table.item(row, 2) else ""
+        
         if column == 0 and node_id:
             # Toggle favorite
             if node_id in self.favorite_nodes:
                 self.favorite_nodes.remove(node_id)
+                # Update display to show unfavorited
+                if self.nodes_table.item(row, 0):
+                    self.nodes_table.item(row, 0).setText("")
             else:
                 self.favorite_nodes.add(node_id)
+                # Update display to show favorited
+                if self.nodes_table.item(row, 0):
+                    self.nodes_table.item(row, 0).setText("★")
+                else:
+                    item = QTableWidgetItem("★")
+                    self.nodes_table.setItem(row, 0, item)
             self.saveFavorites()
             self.results_display.append(f"Favorite toggled for node {node_id}.")
+        else:
+            # Set as target for any other column click
+            if node_id:
+                # Update target selection dropdown
+                target_text = f"{node_user} ({node_id})" if node_user else node_id
+                
+                # Check if already in dropdown
+                found = False
+                for i in range(self.target_select.count()):
+                    if node_id in self.target_select.itemText(i):
+                        self.target_select.setCurrentIndex(i)
+                        found = True
+                        break
+                
+                if not found:
+                    # Add to dropdown and select it
+                    self.target_select.addItem(target_text)
+                    self.target_select.setCurrentText(target_text)
+                
+                self.results_display.append(f"Selected target: {target_text}")
 
     def onNodeCellDoubleClicked(self, row, column):
         """Handle double-clicks for detailed traceroute view"""
@@ -878,7 +1198,26 @@ class MeshtasticClientGUI(QWidget):
                 nodes = list(self.discovered_nodes.values())
                 self.update_nodes_table(nodes)
         except Exception as e:
-            self.results_display.append(f"Failed to load discovered nodes: {str(e)}")
+            if hasattr(self, 'results_display'):
+                self.results_display.append(f"Failed to load discovered nodes: {str(e)}")
+
+    def saveFavorites(self):
+        try:
+            with open(self.favorites_file, 'w') as f:
+                json.dump(list(self.favorite_nodes), f, indent=2)
+        except Exception as e:
+            if hasattr(self, 'results_display'):
+                self.results_display.append(f"Failed to save favorites: {str(e)}")
+
+    def loadFavorites(self):
+        try:
+            if os.path.exists(self.favorites_file):
+                with open(self.favorites_file, 'r') as f:
+                    favorites_list = json.load(f)
+                    self.favorite_nodes = set(favorites_list) if isinstance(favorites_list, list) else set()
+        except Exception as e:
+            if hasattr(self, 'results_display'):
+                self.results_display.append(f"Failed to load favorites: {str(e)}")
 
     def saveNodeRemarks(self):
         try:
@@ -886,13 +1225,6 @@ class MeshtasticClientGUI(QWidget):
                 json.dump(self.node_remarks, f, indent=2)
         except Exception as e:
             self.results_display.append(f"Failed to save node remarks: {str(e)}")
-
-    def saveFavorites(self):
-        try:
-            with open(self.favorites_file, 'w') as f:
-                json.dump(list(self.favorite_nodes), f, indent=2)
-        except Exception as e:
-            self.results_display.append(f"Failed to save favorites: {str(e)}")
 
     def saveConnectionPresets(self):
         try:
@@ -916,30 +1248,66 @@ class MeshtasticClientGUI(QWidget):
             report = []
             repaired = False
             try:
+                if not os.path.exists(path):
+                    # File doesn't exist yet - create empty default
+                    default_data = {} if path.endswith('.json') else []
+                    with open(path, 'w') as f:
+                        json.dump(default_data, f, indent=2)
+                    report.append(f"Created default file: {path}")
+                    return default_data, report, False
+                
                 with open(path, 'r') as f:
                     data = json.load(f)
                 # Sanity check: must be dict or list
                 if not isinstance(data, (dict, list)):
                     report.append(f"File {path} is not a dict or list. Marked as faulty.")
                     return None, report, repaired
-                # Check entries for dicts
-                if isinstance(data, dict):
+                # Check entries for dicts (only for specific file types)
+                if isinstance(data, dict) and path not in [self.settings_file]:
                     for k, v in list(data.items()):
-                        if not isinstance(v, dict):
-                            report.append(f"Faulty entry in {path}: key '{k}' is not a dict. Attempting repair.")
+                        if not isinstance(v, (dict, str, int, float, bool, list)) and v is not None:
+                            report.append(f"Faulty entry in {path}: key '{k}' has invalid type. Attempting repair.")
                             # Attempt repair: wrap in dict
-                            data[k] = {"repaired": True, "original": v, "remark": "Faulty entry detected and wrapped."}
-                            repaired = True
-                elif isinstance(data, list):
-                    for i, v in enumerate(data):
-                        if not isinstance(v, dict):
-                            report.append(f"Faulty entry in {path}: index {i} is not a dict. Attempting repair.")
-                            data[i] = {"repaired": True, "original": v, "remark": "Faulty entry detected and wrapped."}
+                            data[k] = {"repaired": True, "original": str(v), "remark": "Faulty entry detected and wrapped."}
                             repaired = True
                 return data, report, repaired
             except Exception as e:
-                report.append(f"Failed to load {path}: {str(e)}. Marked as faulty.")
-                return None, report, repaired
+                report.append(f"Failed to load {path}: {str(e)}. Creating default file.")
+                # Create default file
+                try:
+                    default_data = {} if path.endswith('.json') else []
+                    with open(path, 'w') as f:
+                        json.dump(default_data, f, indent=2)
+                    return default_data, [], False
+                except Exception:
+                    return None, report, repaired
+
+        # Load basic settings first
+        try:
+            if os.path.exists(self.settings_file):
+                with open(self.settings_file, 'r') as f:
+                    settings = json.load(f)
+                    if "connection_method" in settings and hasattr(self, 'connection_method'):
+                        index = self.connection_method.findText(settings["connection_method"])
+                        if index >= 0:
+                            self.connection_method.setCurrentIndex(index)
+                    if "connection_address" in settings and hasattr(self, 'connection_input'):
+                        self.connection_input.setText(settings["connection_address"])
+                    if "location_service" in settings:
+                        self.location_service = settings["location_service"]
+                        if hasattr(self, 'location_service_combo'):
+                            self.location_service_combo.setCurrentText(self.location_service)
+                    if "column_visibility" in settings and hasattr(self, 'nodes_table'):
+                        # Restore column visibility
+                        self.column_visibility = settings["column_visibility"]
+                        for i in range(self.nodes_table.columnCount()):
+                            header_item = self.nodes_table.horizontalHeaderItem(i)
+                            if header_item:
+                                column_name = header_item.text()
+                                if column_name in self.column_visibility:
+                                    self.nodes_table.setColumnHidden(i, not self.column_visibility[column_name])
+        except Exception:
+            pass
 
         summary_report = []
         files_checked = [
@@ -956,7 +1324,7 @@ class MeshtasticClientGUI(QWidget):
         for attr, path in files_checked:
             if path:
                 data, report, repaired = check_and_repair_json_file(path)
-                if data:
+                if data is not None:
                     summary_report.append(f"{attr}: loaded and checked.")
                     if report:
                         summary_report.extend(report)
@@ -969,14 +1337,46 @@ class MeshtasticClientGUI(QWidget):
                         except Exception as e:
                             summary_report.append(f"{attr}: failed to save repaired file: {str(e)}")
                 else:
-                    summary_report.append(f"{attr}: faulty or missing.")
+                    summary_report.append(f"{attr}: failed to load or create.")
                     if report:
                         summary_report.extend(report)
-        # Display summary report in results_display
-        self.results_display.append("\n--- Data Integrity Report ---")
-        for line in summary_report:
-            self.results_display.append(line)
-        self.results_display.append("--- End of Report ---\n")
+        
+        # Only display report if there are issues
+        if any("faulty" in line or "failed" in line.lower() or "error" in line.lower() for line in summary_report):
+            if hasattr(self, 'results_display'):
+                self.results_display.append("\n--- Data Integrity Report ---")
+                for line in summary_report:
+                    self.results_display.append(line)
+                self.results_display.append("--- End of Report ---\n")
+    
+    def onToggleConfigVisibility(self):
+        """Toggle configuration visibility"""
+        visible = not self.config_scroll.isVisible()
+        self.config_scroll.setVisible(visible)
+        self.toggle_config_btn.setText("\u25BC Hide Configuration" if visible else "\u25B6 Show Configuration")
+    
+    def onMessageTypeChanged(self, msg_type):
+        """Handle message type change"""
+        if msg_type == "To Channel":
+            self.ack_cb.setEnabled(False)
+        else:
+            self.ack_cb.setEnabled(True)
+    
+    def updateNodesTable(self):
+        """Update the nodes table with current data"""
+        # This method refreshes the table display
+        if hasattr(self, 'discovered_nodes'):
+            nodes = list(self.discovered_nodes.values())
+            self.update_nodes_table(nodes)
+    
+    def saveNodeKeys(self):
+        """Save node keys to file"""
+        try:
+            with open(self.node_keys_file, 'w') as f:
+                json.dump(self.node_keys, f, indent=2)
+        except Exception as e:
+            if hasattr(self, 'results_display'):
+                self.results_display.append(f"Failed to save node keys: {str(e)}")
     
     def loadDeviceConnections(self):
         """Load device connections for smart preset matching"""
