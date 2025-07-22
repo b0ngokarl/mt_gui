@@ -124,13 +124,18 @@ class MeshtasticClientGUI(QWidget):
         self.connection_preset.setMaximumWidth(150)
         self.connection_preset.currentTextChanged.connect(self.onPresetChanged)
         first_row.addWidget(self.connection_preset)
-        
-        # Preset management buttons
+
+        # Inline preset name input and save button
+        self.preset_name_input = QLineEdit()
+        self.preset_name_input.setPlaceholderText("Preset name")
+        self.preset_name_input.setMaximumWidth(120)
+        first_row.addWidget(self.preset_name_input)
+
         self.save_preset_btn = QPushButton("Save Preset")
         self.save_preset_btn.clicked.connect(self.onSavePreset)
         self.save_preset_btn.setMaximumWidth(90)
         first_row.addWidget(self.save_preset_btn)
-        
+
         self.delete_preset_btn = QPushButton("Delete")
         self.delete_preset_btn.clicked.connect(self.onDeletePreset)
         self.delete_preset_btn.setMaximumWidth(60)
@@ -557,39 +562,19 @@ class MeshtasticClientGUI(QWidget):
                     break
     
     def onSavePreset(self):
-        """Save current connection as preset (cross-platform custom dialog)"""
-        dialog = QDialog(self)
-        dialog.setWindowTitle("Save Preset")
-        layout = QVBoxLayout(dialog)
-        label = QLabel("Preset name:")
-        layout.addWidget(label)
-        name_input = QLineEdit()
-        layout.addWidget(name_input)
-        btn_layout = QHBoxLayout()
-        ok_btn = QPushButton("OK")
-        cancel_btn = QPushButton("Cancel")
-        btn_layout.addWidget(ok_btn)
-        btn_layout.addWidget(cancel_btn)
-        layout.addLayout(btn_layout)
-        result = {'ok': False, 'name': ''}
-        def accept():
-            result['ok'] = True
-            result['name'] = name_input.text()
-            dialog.accept()
-        def reject():
-            dialog.reject()
-        ok_btn.clicked.connect(accept)
-        cancel_btn.clicked.connect(reject)
-        dialog.setLayout(layout)
-        if dialog.exec_() == QDialog.Accepted and result['ok'] and result['name']:
-            name = result['name']
-            self.connection_presets[name] = {
-                "method": self.connection_method.currentText(),
-                "address": self.connection_input.text(),
-                "remark": self.remark_input.text()
-            }
-            self.updatePresetCombo()
-            QMessageBox.information(self, "Preset Saved", f"Preset '{name}' saved.")
+        """Save current connection as preset using inline input"""
+        name = self.preset_name_input.text().strip()
+        if not name:
+            QMessageBox.warning(self, "Save Preset", "Preset name cannot be empty.")
+            return
+        self.connection_presets[name] = {
+            "method": self.connection_method.currentText(),
+            "address": self.connection_input.text(),
+            "remark": self.remark_input.text()
+        }
+        self.updatePresetCombo()
+        self.preset_name_input.clear()
+        QMessageBox.information(self, "Preset Saved", f"Preset '{name}' saved.")
     
     def onDeletePreset(self):
         """Delete selected preset"""
