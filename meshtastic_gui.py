@@ -1187,6 +1187,9 @@ class MeshtasticClientGUI(QWidget):
         try:
             with open(self.discovered_nodes_file, 'w') as f:
                 json.dump(self.discovered_nodes, f, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            self.results_display.append("Discovered nodes saved.")
         except Exception as e:
             self.results_display.append(f"Failed to save discovered nodes: {str(e)}")
 
@@ -1223,6 +1226,9 @@ class MeshtasticClientGUI(QWidget):
         try:
             with open(self.node_remarks_file, 'w') as f:
                 json.dump(self.node_remarks, f, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            self.results_display.append("Node remarks saved.")
         except Exception as e:
             self.results_display.append(f"Failed to save node remarks: {str(e)}")
 
@@ -1382,6 +1388,22 @@ class MeshtasticClientGUI(QWidget):
         """Load device connections for smart preset matching"""
         # Real device connections load logic could be added here
         pass
+
+    def onToggleConfigVisibility(self):
+        """Toggle the visibility of the configuration editor."""
+        if hasattr(self, 'config_scroll'):
+            visible = self.config_scroll.isVisible()
+            self.config_scroll.setVisible(not visible)
+            if not visible:
+                self.toggle_config_btn.setText("▼ Hide Configuration")
+            else:
+                self.toggle_config_btn.setText("▶ Show Configuration")
+            self.results_display.append(f"Configuration editor {'shown' if not visible else 'hidden'}.")
+
+    def onMessageTypeChanged(self, text):
+        """Handle changes to the message type selector."""
+        # You can add logic here to enable/disable fields based on message type
+        self.results_display.append(f"Message type changed to: {text}")
 
 # Main execution
 if __name__ == "__main__":
