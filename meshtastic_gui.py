@@ -557,9 +557,32 @@ class MeshtasticClientGUI(QWidget):
                     break
     
     def onSavePreset(self):
-        """Save current connection as preset"""
-        name, ok = QInputDialog.getText(self, "Save Preset", "Preset name:")
-        if ok and name:
+        """Save current connection as preset (cross-platform custom dialog)"""
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Save Preset")
+        layout = QVBoxLayout(dialog)
+        label = QLabel("Preset name:")
+        layout.addWidget(label)
+        name_input = QLineEdit()
+        layout.addWidget(name_input)
+        btn_layout = QHBoxLayout()
+        ok_btn = QPushButton("OK")
+        cancel_btn = QPushButton("Cancel")
+        btn_layout.addWidget(ok_btn)
+        btn_layout.addWidget(cancel_btn)
+        layout.addLayout(btn_layout)
+        result = {'ok': False, 'name': ''}
+        def accept():
+            result['ok'] = True
+            result['name'] = name_input.text()
+            dialog.accept()
+        def reject():
+            dialog.reject()
+        ok_btn.clicked.connect(accept)
+        cancel_btn.clicked.connect(reject)
+        dialog.setLayout(layout)
+        if dialog.exec_() == QDialog.Accepted and result['ok'] and result['name']:
+            name = result['name']
             self.connection_presets[name] = {
                 "method": self.connection_method.currentText(),
                 "address": self.connection_input.text(),
