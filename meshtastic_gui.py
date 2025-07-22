@@ -736,9 +736,72 @@ class MeshtasticClientGUI(QWidget):
         QMessageBox.information(self, "Traceroute Details", f"Detailed traceroute for row {row}, column {column} (simulated).")
     
     def loadSettings(self):
-        """Load all settings and data from files"""
-        # Simulated load
-        self.results_display.append("Settings loaded (simulated).")
+        """Load all settings and data from files, with automated repair and detailed reporting for JSON files"""
+        def check_and_repair_json_file(path, key=None):
+            report = []
+            repaired = False
+            try:
+                with open(path, 'r') as f:
+                    data = json.load(f)
+                # Sanity check: must be dict or list
+                if not isinstance(data, (dict, list)):
+                    report.append(f"File {path} is not a dict or list. Marked as faulty.")
+                    return None, report, repaired
+                # Check entries for dicts
+                if isinstance(data, dict):
+                    for k, v in list(data.items()):
+                        if not isinstance(v, dict):
+                            report.append(f"Faulty entry in {path}: key '{k}' is not a dict. Attempting repair.")
+                            # Attempt repair: wrap in dict
+                            data[k] = {"repaired": True, "original": v, "remark": "Faulty entry detected and wrapped."}
+                            repaired = True
+                elif isinstance(data, list):
+                    for i, v in enumerate(data):
+                        if not isinstance(v, dict):
+                            report.append(f"Faulty entry in {path}: index {i} is not a dict. Attempting repair.")
+                            data[i] = {"repaired": True, "original": v, "remark": "Faulty entry detected and wrapped."}
+                            repaired = True
+                return data, report, repaired
+            except Exception as e:
+                report.append(f"Failed to load {path}: {str(e)}. Marked as faulty.")
+                return None, report, repaired
+
+        summary_report = []
+        files_checked = [
+            ("settings_file", getattr(self, 'settings_file', 'meshtastic_settings.json')),
+            ("node_remarks_file", getattr(self, 'node_remarks_file', None)),
+            ("discovered_nodes_file", getattr(self, 'discovered_nodes_file', None)),
+            ("favorites_file", getattr(self, 'favorites_file', None)),
+            ("node_keys_file", getattr(self, 'node_keys_file', None)),
+            ("telemetry_stats_file", getattr(self, 'telemetry_stats_file', None)),
+            ("connection_presets_file", getattr(self, 'connection_presets_file', None)),
+            ("traceroute_history_file", getattr(self, 'traceroute_history_file', None)),
+            ("telemetry_history_file", getattr(self, 'telemetry_history_file', None)),
+        ]
+        for attr, path in files_checked:
+            if path:
+                data, report, repaired = check_and_repair_json_file(path)
+                if data:
+                    summary_report.append(f"{attr}: loaded and checked.")
+                    if report:
+                        summary_report.extend(report)
+                    if repaired:
+                        # Save repaired file
+                        try:
+                            with open(path, 'w') as f:
+                                json.dump(data, f, indent=2)
+                            summary_report.append(f"{attr}: faulty entries repaired and file updated.")
+                        except Exception as e:
+                            summary_report.append(f"{attr}: failed to save repaired file: {str(e)}")
+                else:
+                    summary_report.append(f"{attr}: faulty or missing.")
+                    if report:
+                        summary_report.extend(report)
+        # Display summary report in results_display
+        self.results_display.append("\n--- Data Integrity Report ---")
+        for line in summary_report:
+            self.results_display.append(line)
+        self.results_display.append("--- End of Report ---\n")
     
     def loadDeviceConnections(self):
         """Load device connections for smart preset matching"""
