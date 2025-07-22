@@ -4,7 +4,8 @@ import os
 import subprocess
 import datetime
 import csv
-from PyQt5.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout, 
+import shlex  # For parsing custom CLI input
+from PyQt5.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout,
                              QGroupBox, QComboBox, QLineEdit, QPushButton, 
                              QLabel, QMessageBox, QFileDialog, QTableWidget,
                              QTableWidgetItem, QTextEdit, QSpinBox, QCheckBox, 
@@ -318,6 +319,18 @@ class MeshtasticClientGUI(QWidget):
         message_controls.addWidget(self.clear_log_btn)
         
         message_controls.addStretch()
+        
+        # Custom CLI command input row
+        custom_cmd_controls = QHBoxLayout()
+        custom_cmd_controls.addWidget(QLabel("Custom CLI:"))
+        self.custom_cmd_input = QLineEdit()
+        self.custom_cmd_input.setPlaceholderText("Additional meshtastic args, e.g. --info --export-config file.yaml")
+        custom_cmd_controls.addWidget(self.custom_cmd_input)
+        self.run_cli_btn = QPushButton("Run CLI")
+        self.run_cli_btn.clicked.connect(self.onRunCustom)
+        custom_cmd_controls.addWidget(self.run_cli_btn)
+        custom_cmd_controls.addStretch()
+        actions_layout.addLayout(custom_cmd_controls)
         
         # Results display
         self.results_display = QTextEdit()
@@ -719,6 +732,26 @@ class MeshtasticClientGUI(QWidget):
         """Clear log"""
         if hasattr(self, 'results_display'):
             self.results_display.clear()
+    
+    def onRunCustom(self):
+        """Run a custom Meshtastic CLI command using entered arguments"""
+        args_text = self.custom_cmd_input.text().strip()
+        if not args_text:
+            QMessageBox.warning(self, "Custom CLI", "Please enter CLI arguments to run.")
+            return
+        try:
+            user_args = shlex.split(args_text)
+            cmd = self.buildMeshtasticCommand(*user_args)
+            self.results_display.append(f"Running custom CLI: {' '.join(cmd)}")
+            process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            output, error = process.communicate()
+            if error:
+                self.results_display.append(f"Error: {error}")
+            if output:
+                self.results_display.append(output)
+            self.results_display.append("Custom CLI execution completed.")
+        except Exception as e:
+            self.results_display.append(f"Custom CLI error: {str(e)}")
 
     def buildMeshtasticCommand(self, *args):
         """Build a meshtastic command with proper connection parameters based on current settings."""
@@ -863,7 +896,7 @@ class MeshtasticClientGUI(QWidget):
                         continue
                 # If no format works, assume it's recent
                 return datetime.datetime.now()
-            except:
+            except Exception:
                 return None
         
         # Build a mapping of existing nodes from the table
@@ -1389,31 +1422,9 @@ class MeshtasticClientGUI(QWidget):
         # Real device connections load logic could be added here
         pass
 
-    def onToggleConfigVisibility(self):
-        """Toggle the visibility of the configuration editor."""
-        if hasattr(self, 'config_scroll'):
-            visible = self.config_scroll.isVisible()
-            self.config_scroll.setVisible(not visible)
-            if not visible:
-                self.toggle_config_btn.setText("▼ Hide Configuration")
-            else:
-                self.toggle_config_btn.setText("▶ Show Configuration")
-            self.results_display.append(f"Configuration editor {'shown' if not visible else 'hidden'}.")
-
-    def onMessageTypeChanged(self, text):
-        """Handle changes to the message type selector."""
-        # You can add logic here to enable/disable fields based on message type
-        self.results_display.append(f"Message type changed to: {text}")
-
-# Main execution
 if __name__ == "__main__":
+    # Launch the Meshtastic GUI application
     app = QApplication(sys.argv)
-    app.setApplicationName("Meshtastic GUI")
-    app.setApplicationVersion("1.0")
-    
-    # Create and show the main window
-    window = MeshtasticClientGUI()
-    window.show()
-    
-    # Run the application
+    gui = MeshtasticClientGUI()
+    gui.show()
     sys.exit(app.exec_())
